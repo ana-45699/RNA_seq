@@ -1,0 +1,256 @@
+---
+title: "RNA-seq Analysis"
+author: "Ana Romani"
+date: "2023-12-01"
+---
+Information of input: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4878611/
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Call libraries
+```{r,echo=FALSE,warning=FALSE}
+library("DESeq2")
+library("GenomicFeatures")
+library("ggplot2")
+library("dplyr")
+```
+
+## Input upload and check the information
+```{r DESeqDataSet, warning=FALSE}
+readcounts = read.csv("readcounts_file.csv")
+rownames(readcounts)= readcounts[,1]
+readcounts = readcounts[,-1]
+sample_info <- DataFrame(condition = gsub("_[0-9]+", "", names(readcounts)),
+                          row.names = names(readcounts) )
+DESeq.ds <- DESeqDataSetFromMatrix(countData = readcounts,
+                              colData = sample_info,
+                              design = ~ condition)
+DESeq.ds
+head(counts(DESeq.ds))
+```
+## Exploratory analysis of the raw counts
+We are gonna sum the reads of each gene of each samples to know about the depth of them
+How many reads were counted for each sample ( = library sizes)?
+
+```{r eval=TRUE, echo=TRUE}
+colSums(counts(DESeq.ds))
+```
+
+```{r eval=TRUE, echo=TRUE}
+colSums(counts(DESeq.ds)) %>% barplot
+```
+
+Remove genes with no reads.
+
+```{r eval = TRUE}
+keep_genes <- rowSums(counts(DESeq.ds)) > 0
+dim(DESeq.ds)
+```
+
+```{r}
+DESeq.ds <- DESeq.ds[ keep_genes, ]
+dim(DESeq.ds)
+```
+
+Now that we have the data in the right format, we can use `estimateSizeFactors()` as the first step to normalize
+the data taking in count the difference depth of the samples
+Deseq2 uses the method median-of-ratios to calculate the size factors
+
+```{r sizeFactors}
+DESeq.ds <- estimateSizeFactors(DESeq.ds)
+sizeFactors(DESeq.ds)
+```
+
+Check section 5.1.2 of the course notes to see the code for calculating the size
+factors yourself with base R functions.
+
+```{r sizeFactor_vs_librarySizes, eval=TRUE, echo=TRUE}
+plot(sizeFactors(DESeq.ds), colSums(counts(DESeq.ds)))
+```
+
+The read counts normalized for sequencing depth can be accessed via
+`counts(DESeq.ds, normalized = TRUE)`.
+
+Let's check whether the normalization helped to adjust global differences between the samples.
+
+```{r boxplots_untransformed, fig.width = 10, fig.height = 5}
+# setting up the plotting layout
+par(mfrow=c(1,2))
+counts.sf_normalized <- counts(DESeq.ds, normalized=TRUE)
+
+# adding the boxplots
+boxplot(counts.sf_normalized, main = "SF normalized")
+boxplot(counts(DESeq.ds), main = "read counts only")
+```
+## Exploring the data with normalize counts and compared with raw counts.
+```{r boxplots_logReadCounts, fig.width = 10, fig.height = 5, warning=FALSE}
+par(mfrow=c(1,2)) # to plot the two box plots next to each other
+boxplot(log2(counts(DESeq.ds)), notch=TRUE,
+        main = "Non-normalized read counts\n(log-transformed)",
+        ylab="read counts")
+boxplot(log2(counts(DESeq.ds, normalize= TRUE)), notch=TRUE,
+        main = "Size-factor-normalized read counts\n(log-transformed)",
+        ylab="read counts") 
+```
+
+```{r logReadCountTables}
+# non-normalized read counts plus pseudocount
+assay(DESeq.ds, "log.counts") <- log2(counts(DESeq.ds, normalized = FALSE)+1)
+# normalized and log2-transformed read counts
+assay(DESeq.ds, "log.norm.counts") <- log2(counts(DESeq.ds, normalized=TRUE)+1)
+```
+
+```{r scatterplots_logNormReadCounts, fig.width = 10, fig.height = 15}
+par(mfrow=c(2,1)) 
+DESeq.ds[, c("WT_1","WT_5")] %>% assay(., "log.counts") %>% 
+    plot(., cex=.1, main = "WT_1 vs. WT_5 (Raw)")
+DESeq.ds[, c("WT_1","WT_5")] %>% assay(.,  "log.norm.counts") %>% 
+    plot(., cex=.1, main = "WT_1 vs. WT_5")
+```
+```{r rlog_vs_log2, fig.width = 15, fig.height = 8}
+par(mfrow=c(1,2)) 
+plot(assay(DESeq.ds[,1:2],  "log.norm.counts"), cex=.1,
+     main = "size factor and log2-transformed")
+DESeq.rlog <- rlog(DESeq.ds, blind = TRUE)
+# the rlog-transformed counts are stored in the accessor "assay"
+plot(assay(DESeq.rlog)[,1],
+     assay(DESeq.rlog)[,2],
+     cex=.1, main = "rlog transformed",
+     xlab = colnames(assay(DESeq.rlog[,1])),
+     ylab = colnames(assay(DESeq.rlog[,2])) )
+rlog.norm.counts <- assay(DESeq.rlog)
+```
+
+## Correlation between the counts
+```{r }
+rlog.norm.counts <- assay(DESeq.rlog)
+corr_coeff <- cor(rlog.norm.counts, method = "pearson")
+as.dist(1-corr_coeff, upper = TRUE) %>% as.matrix %>%
+    pheatmap::pheatmap(., main = "Pearson correlation")
+```
+
+## PCA
+```{r pca, eval=FALSE}
+rv <- rowVars(assay(DESeq.rlog)) # equivalent to rowVars(rlog.norm.counts)
+top_variable <- order(rv, decreasing = TRUE)[seq_len(500)]
+pca <- prcomp(t(assay(DESeq.rlog)[top_variable, ]))
+head(pca$x)
+pca_table = as.data.frame(pca$x)
+pca_table$condition = as.factor(sample_info$condition)
+ggplot(data=pca_table,aes(x=PC1,y=PC2,color=condition))+
+  geom_point(size=4,alpha=0.6)+
+  theme_classic()
+plot(pca$x,col=as.factor(sample_info$condition))
+```
+
+## Differential expression analysis
+```{r pca, eval=FALSE}
+DESeq.ds = DESeq(DESeq.ds)
+res <- results(DESeq.ds, contrast = c("condition", "SNF2", "WT"))
+res
+```
+```{r}
+resultsNames(DESeq.ds) # tells you which types of values can be extracted with results()
+DGE.results <- results(DESeq.ds,
+                       independentFiltering = TRUE,
+                       alpha = 0.05)
+head(DGE.results) # first line indicates which comparison was done for the log2FC
+summary(DGE.results)
+
+# the DESeqResult object can basically be handled like a data.frame
+table(DGE.results$padj < 0.05)
+```
+
+```{r MAplots}
+plotMA(DGE.results, alpha = 0.05, 
+       main = "Test: p.adj.value < 0.05", ylim = c(-4,4))
+```
+```{r adjpvalueHistogram}
+hist(DGE.results$padj, 
+  col="grey", border="white", xlab="", ylab="",
+  main="frequencies of adj. p-values\n(all genes)")
+```
+A sorted results table so that we can immediately see which genes come up as the best candidates:
+
+```{r Deseq}
+DGE.results.sorted <- DGE.results[order(-DGE.results$log2FoldChange),]
+head(DGE.results.sorted)
+```
+
+Plotting counts for single genes (seq. depth normalized, log2-transformed)
+
+```{r singleGenePlot}
+par(mfrow=c(1,2))
+plotCounts(DESeq.ds, gene="YAL056W", normalized = TRUE)  
+plotCounts(DESeq.ds, gene=which.max(DGE.results$padj), main = "Max. p.adj.")
+```
+
+```{r heatmap genes comparison}
+# identify genes with the desired adjusted p-value cut-off
+DGEgenes <- rownames(subset(DGE.results.sorted, padj < 0.05))[1:10]
+
+# extract rlog-transformed values of DE genes into a matrix
+rlog.dge <- DESeq.rlog[DGEgenes,] %>% assay
+
+library(pheatmap)
+# heatmap of DEG sorted by p.adjust
+pheatmap(rlog.dge, scale="none", show_rownames = TRUE,
+  main = "DGE (no scaling)")
+pheatmap(rlog.dge, scale="row", show_rownames = TRUE,
+  main = "DGE (row-based z-score)")
+```
+```{r singleGenePlot_noDGE, echo = TRUE}
+plotCounts(dds = DESeq.ds,
+           gene = "YOR290C",
+           normalized = TRUE, transform = FALSE,
+           main = expression(atop("Expression of "*italic("snf2"), "(YOR290C)")))
+
+```
+## GSEA
+
+```{r GSEA analysis}
+library(clusterProfiler)
+library("org.Sc.sgd.db")
+resGSEA <- DGE.results[order(-DGE.results$log2FoldChange),] 
+gene_list <- resGSEA$log2FoldChange
+original_gene_list <- resGSEA$log2FoldChange
+names(gene_list) <- rownames(resGSEA) #Le da el mismo nombre de columnas que nuestros genes
+gene_list
+gse <- gseGO(gene_list, ont = "ALL", keyType = "ORF", OrgDb = "org.Sc.sgd.db", eps = 1e-300)
+dotplot(gse, showCategory=10, split=".sign", font.size=5) + facet_grid(.~.sign)
+cnetplot(gse, categorySize="pvalue", foldChange=gene_list, showCategory = 6)
+```
+```{r}
+## clusterProfiler requires a sorted vector where the values correspond
+## to the measure used for the sorting 
+DGE.results <- DGE.results[order(-1*DGE.results$log2FoldChange),]
+genes_for_cp <- DGE.results$log2FoldChange
+names(genes_for_cp) <- row.names(DGE.results)
+
+## run the gene set enrichment analysis
+gsea_kegg <- clusterProfiler::gseKEGG(geneList = genes_for_cp, organism = 'sce',
+                                      nPerm = 1000, minGSSize = 10,
+                                      pvalueCutoff = 1, verbose = FALSE)
+```
+
+**Dot plots**:
+
+Dot plots depict the enrichment scores and gene counts per gene set (for the most significant gene sets).
+
+```{r dotplot_kegg}
+dotplot(gsea_kegg,font.size=6)
+```
+
+```{r cnetplot_kegg, message = FALSE, warning = FALSE, fig.width = 16, fig.height = 14}
+ cnetplot(gsea_kegg,
+   showCategory = 2, node_label = "gene",colorEdge = TRUE, foldChange = genes_for_cp) +
+  scale_colour_gradient2(name = "log2FC",
+    low = "navyblue", high = "red", mid = "white")
+```
+# References
+
+Piper, M. M. R. K. M. (2017, April 26). Count normalization with DESeq2. Introduction to DGE. https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html
+GitHub - friedue/course_RNA-seq2019. GitHub. https://github.com/friedue/course_RNA-seq2019/tree/master
+GitHub - EveliaCoss/RNASeq_Workshop_Nov2023: Workshop: Análisis de datos de RNA-Seq del 6 al 10 de nov 2023. GitHub. https://github.com/EveliaCoss/RNASeq_Workshop_Nov2023/tree/main
+
